@@ -1,0 +1,69 @@
+---
+title: "Practical Machine Learning - Course Project"
+author: "Simon Keith"
+date: "`r format(Sys.Date(), '%F')`"
+output: 
+  html_document: 
+    highlight: zenburn
+    toc: yes
+    toc_depth: 3
+linkcolor: red
+urlcolor: red
+citecolor: red
+---
+
+```{r options, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Introduction
+<br>  
+
+# Reading data
+```{r setup, message=FALSE}
+if (!require("pacman")) {install.packages("pacman"); library(pacman)}
+p_load(data.table)
+
+```
+
+```{r input, message=FALSE, cache=TRUE}
+# Downloading and reading the training set
+HAR <- fread("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv", 
+             na.strings = c("NA", "", "#DIV/0!"), drop = 1)
+
+# Downloading and reading the test set
+HAR.test <- fread("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv", 
+                  na.strings = c("NA", "", "#DIV/0!"), drop = 1)
+```
+
+```{r clean, results='hide'}
+# Parsing timesamp and dropping useless datetime columns
+HAR[, ts := as.POSIXct(raw_timestamp_part_1, origin = "1970-01-01", tz = "UTC")]
+HAR.test[, ts := as.POSIXct(raw_timestamp_part_1, origin = "1970-01-01", tz = "UTC")]
+drop_cols <- c("raw_timestamp_part_1", "raw_timestamp_part_2", "cvtd_timestamp")
+HAR[, (drop_cols) := NULL]; HAR.test[, (drop_cols) := NULL]
+
+# Some columns are incorrectly detected as character by fread, presumably because they  
+# contain too many NAs. We convert these columns to numeric when the convertion does not 
+# procude any NA. Otherwise, we convert them as factors
+convert_chars <- function(DT) {
+    try_convert <- function(x) {
+        tryCatch({
+            as.numeric(x)
+        }, warning = function(e) {
+            as.factor(x)
+        })
+    }
+    char_cols <- which(sapply(DT, is.character))
+    for (j in char_cols) set(DT, j = j, value = try_convert(DT[[j]]))
+}
+convert_chars(HAR); convert_chars(HAR.test)
+
+# Finally drop columns where NAs account for more than 10% of the observations
+drop_cols <- which(sapply(HAR, function(col) mean(is.na(col)) > .1))
+HAR[, (drop_cols) := NULL]; HAR.test[, (drop_cols) := NULL]
+
+# Clean env
+rm(convert_chars, drop_cols)
+```
+
