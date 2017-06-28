@@ -4,43 +4,77 @@ author: "Simon Keith"
 date: "`r format(Sys.Date(), '%F')`"
 output: 
   html_document: 
+    code_folding: hide
+    fig_width: 10
+    fig_height: 6
+    dev: CairoSVG
     highlight: zenburn
+    theme: united
     toc: yes
     toc_depth: 3
-linkcolor: red
-urlcolor: red
-citecolor: red
 ---
 
-```{r options, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE)
+```{r setup, include=FALSE}
+# global options
+options(width = 110)
+Sys.setenv(TZ = "UTC")
+set.seed(607015)
+
+# installing pacman and loading rendering packages
+if (!require("pacman")) {
+      install.packages("pacman")
+      require("pacman")
+}
+p_load(knitr, pander, MASS, data.table, plyr, dplyr, dtplyr, caret, magrittr, 
+       ggplot2, Cairo, gridExtra, plotly, doParallel, htmltools, stringr)
+
+# setup knitr
+opts_chunk$set(cache.rebuild = FALSE, message = FALSE)
+
+# setup pander
+panderOptions('table.alignment.default', 'left')
+panderOptions('table.alignment.rownames', 'left')
+panderOptions('table.split.table', Inf)
 ```
 
 # Introduction
-<br>  
+This work was done for the “Practical Machine Learning” course project, as part of the [Data Science specialization](https://www.coursera.org/specializations/jhu-data-science) on Coursera.  
 
-# Reading data
-```{r setup, message=FALSE}
-if (!require("pacman")) {install.packages("pacman"); library(pacman)}
-p_load(data.table)
+The aim of this analysis is to use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants in a physical activity in order to predict the manner in which they did the exercise.  
+<br>
 
-```
-
+# Reading and cleaning data
+We first pull the data from the provided URLs. We store the train and test sets in two different data tables.  
 ```{r input, message=FALSE, cache=TRUE}
-# Downloading and reading the training set
-HAR <- fread("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv", 
-             na.strings = c("NA", "", "#DIV/0!"), drop = 1)
-
-# Downloading and reading the test set
-HAR.test <- fread("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv", 
-                  na.strings = c("NA", "", "#DIV/0!"), drop = 1)
+if (file.exists("data_cache/HAR.rds") & file.exists("data_cache/HAR.test.rds")) {
+      HAR <- readRDS("data_cache/HAR.rds")
+      HAR.test <- readRDS("data_cache/HAR.test.rds")
+} else {
+      if (!dir.exists("data_cache")) dir.create("data_cache")
+      # Downloading and reading the training set
+      HAR <- fread("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv", 
+                   na.strings = c("NA", "", "#DIV/0!"), drop = 1)
+      saveRDS(HAR, "data_cache/HAR.rds")
+      
+      # Downloading and reading the test set
+      HAR.test <- fread("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv", 
+                        na.strings = c("NA", "", "#DIV/0!"), drop = 1)
+      saveRDS(HAR.test, "data_cache/HAR.test.rds")
+}
 ```
+<br>
 
-```{r clean, results='hide'}
+Next, we perform some cleaning on both data sets. The timestamp is reconstructed, and we drop the raw values. Also, we drop the "_window_" columns.  
+
+Many columns are incorrectly detected as character by [fread](https://cran.r-project.org/web/packages/data.table/data.table.pdf#fread), presumably because they contain too many NAs. We convert them automatically to the right type. Finally, columns with more than 10% NAs in the training sets are dropped from both data sets.  
+```{r clean, results='hide', cache=TRUE}
 # Parsing timesamp and dropping useless datetime columns
-HAR[, ts := as.POSIXct(raw_timestamp_part_1, origin = "1970-01-01", tz = "UTC")]
-HAR.test[, ts := as.POSIXct(raw_timestamp_part_1, origin = "1970-01-01", tz = "UTC")]
-drop_cols <- c("raw_timestamp_part_1", "raw_timestamp_part_2", "cvtd_timestamp")
+HAR[, ts := as.POSIXct(raw_timestamp_part_1 + raw_timestamp_part_2 / 1e6, 
+                       origin = "1970-01-01", tz = "UTC")]
+HAR.test[, ts := as.POSIXct(raw_timestamp_part_1 + raw_timestamp_part_2 / 1e6, 
+                            origin = "1970-01-01", tz = "UTC")]
+drop_cols <- c("raw_timestamp_part_1", "raw_timestamp_part_2", "cvtd_timestamp", 
+               "new_window", "num_window")
 HAR[, (drop_cols) := NULL]; HAR.test[, (drop_cols) := NULL]
 
 # Some columns are incorrectly detected as character by fread, presumably because they  
@@ -63,7 +97,238 @@ convert_chars(HAR); convert_chars(HAR.test)
 drop_cols <- which(sapply(HAR, function(col) mean(is.na(col)) > .1))
 HAR[, (drop_cols) := NULL]; HAR.test[, (drop_cols) := NULL]
 
-# Clean env
-rm(convert_chars, drop_cols)
+# Sort the data set
+sort_keys <- c("user_name", "ts")
+setkeyv(HAR, sort_keys)
+setkeyv(HAR.test, sort_keys)
+```
+```{r force_cache, cache=TRUE, echo=FALSE}
+HAR <- HAR; HAR.test <- HAR.test
+```
+<br>
+
+# Exploratory data analysis
+### Comparing users
+As we can see on the density plot below, we have 6 different participants and 5 activity types. Each of them performed the 5 activities sequentially, in the same order and in a short time period. Thus, we won't be using any time derived information in the training process.  
+```{r user_classe, fig.height=5, cache=TRUE}
+HAR[, density(as.numeric(ts), n = 2^9, bw = "nrd", adjust = .5)[1:2], 
+    by = .(user_name, classe)
+    ][, .(user_name, classe, ts = as.POSIXct(x, origin = "1970-01-01"), density = y)
+      ] %>% ggplot(aes(ts, density, color = classe, fill = classe)) + 
+      scale_x_datetime(date_breaks = "1 min", date_labels = "%H:%M", minor_breaks = NULL) +
+      scale_y_continuous(minor_breaks = NULL) + geom_area(alpha = .25, size = .25) + 
+      facet_wrap(~user_name, ncol = 2, scales = "free_x") + theme_minimal() +
+      labs(title = "Distribution of timestamps across users", x = "timestamp")
+```
+<br>
+
+### Selecting features
+We don't want to learn anything based on __time__ (_ts_) or on the identity of the __participant__ (_user_name_) so we will discard these variables, along with the __target__ (_classe_).  
+
+Then, we check for zero-variance predictors and low frequency values by computing the __frequency ratio__ (_frequency of the most prevalent value over the second most frequent value_) and the __percent of unique values__ (_number of unique values divided by the total number of samples_) for each feature.  
+```{r nzv, cache=TRUE}
+# list useful features only
+fts <- names(HAR)[!names(HAR) %in% c("user_name", "classe", "ts")]
+
+# identification of near zero variance predictors
+nzv <- list()
+nzv$freqCut <- 95/5
+nzv$uniqueCut <- 10
+nzv$res <- nearZeroVar(HAR[, ..fts], saveMetrics = TRUE, 
+                       freqCut = nzv$freqCut, uniqueCut = nzv$uniqueCut) %>% 
+      mutate(feature = rownames(.)) %>% 
+      select(feature, everything()) %>%
+      arrange(desc(freqRatio))
+
+# features with near zero variance or high ratio of frequencies
+top_nzv <- filter(nzv$res, nzv | freqRatio > nzv$freqCut * .5)
+```
+<br>
+
+#### Features with near zero variance or high frequency ratio
+```{r out_nzv, echo=FALSE}
+pander(top_nzv)
 ```
 
+
+We note some quite high frequency ratios, but no feature has both a higher frequency ratio and a lower percentage of distinct values than the defaults cuts. Thus, all features pass the near zero variance test.  
+
+<!-- A plot of the distribution of measurements across features by classe is available in the appendix.   -->
+<!-- ```{r features_dist, echo=FALSE, cache=TRUE} -->
+<!-- # plotting density -->
+<!-- fts_dens <- suppressWarnings(melt(HAR[, c(fts, "classe"), with = FALSE], id.vars = "classe")) -->
+<!-- levels(fts_dens[["variable"]]) <- nzv$res$feature -->
+<!-- fts_lims <- fts_dens[, as.list(quantile(value, c(.01, .99))), by = .(variable)] -->
+<!-- names(fts_lims)[2:3] <- c("lo", "up"); setkey(fts_lims, variable, lo, up) -->
+<!-- fts_dens <- foverlaps(fts_dens[, .(classe, variable, lo = value, up = value)], -->
+<!--                       fts_lims, type = "within", nomatch = 0)[, .(variable, classe, value = i.lo)] -->
+<!-- fts_dens <- fts_dens[, density(value, bw = "nrd", n = 2^8, adjust = .5)[1:2], -->
+<!--                      by = .(variable, classe)] -->
+<!-- features_dist <- ggplot(fts_dens, aes(x, y, color = classe, fill = classe)) +  -->
+<!--       geom_area(alpha = .25, size = .25) + -->
+<!--       facet_wrap(~variable, ncol = 4, scales = "free") + theme_minimal() + -->
+<!--       theme(legend.position = "bottom") +  -->
+<!--       scale_x_continuous(name = NULL, minor_breaks = NULL) + -->
+<!--       scale_y_continuous(name = NULL, breaks = NULL, minor_breaks = NULL) +  -->
+<!--       labs(title = "Distribution of measurements across features") -->
+
+<!-- # clean env -->
+<!-- rm(fts_dens, fts_lims, nzv) -->
+<!-- ``` -->
+<!-- <br> -->
+
+Let's explore the remaining features. Since there are many predictors we will visualize the data trough a [Principal component analysis](https://en.wikipedia.org/wiki/Principal_component_analysis). The plot below shows the two dimensional density of observations based on the two first principal components and grouped by __participant__ on the left and __activity type__ on the right.  
+```{r explore_pca, fig.height=8, cache=TRUE}
+# perform a pca on HAR data
+HAR.pca <- prcomp(HAR[, ..fts], center = TRUE, scale. = TRUE)
+
+# compute percentage of variance
+varp <- HAR.pca$sdev^2
+varp <- data.table(PC = 1:length(varp), varp = cumsum(100 * varp / sum(varp)))
+
+# plot the two first principal components against user_name and classe
+HAR.pca <- data.table(predict(HAR.pca, HAR[, ..fts]))
+HAR.pca[, c("user_name", "classe") := HAR[, .(user_name, classe)]]
+ggbase <- theme_minimal(base_size = 9) + theme(legend.position = "bottom")
+ggc <- guides(color = guide_legend(nrow = 1))
+ggx <- scale_x_continuous(name = NULL, minor_breaks = NULL)
+ggy <- scale_y_continuous(name = NULL, minor_breaks = NULL)
+gd2d_user <- ggplot(HAR.pca, aes(PC1, PC2, color = user_name)) + 
+      geom_density2d(n = 2^8, size = .25) + ggx + ggy + ggbase + ggc
+gd2d_classe <- ggplot(HAR.pca, aes(PC1, PC2, color = classe)) + 
+      geom_density2d(n = 2^8, size = .25) + ggx + ggy + ggbase + ggc
+ggt <- paste("Density of observations by participants", 
+             "and then by type of activity, based on ", 
+             "the first two principal components")
+ncomp <- min(15, nrow(varp))
+ggp <- ggplot(varp[1:ncomp], aes(PC, varp, label = paste(round(varp, 2), "%"))) + 
+      geom_point(alpha = .5, size = .5) + geom_line(alpha = .5, size = .5) +
+      scale_y_continuous(minor_breaks = NULL) + expand_limits(y = 0) +
+      scale_x_continuous(breaks = 1:nrow(varp), minor_breaks = NULL) +
+      labs(y = "% variance", x = "Principal component", 
+           title = "Cumulative proportion of variance explained") + 
+      ggbase + theme(panel.grid.major.x = element_blank()) +
+      geom_label(data = varp[c(1:2, ncomp)], alpha = .75, size = 3,
+                 hjust = "inward", vjust = 1.1)
+gga <- arrangeGrob(gd2d_user, gd2d_classe, ncol = 2, top = ggt)
+grid.arrange(gga, ggp, nrow = 2, heights = c(5, 2))
+```
+<br>
+
+As we can see, the first two components account for __`r paste(formatC(varp[2, varp], digits = 2, format = "f"), "%")`__ of the total variance. They allow to easily separate __participants__ but do not help at all to distinguish among __activity types__. It seems that a lot of the variance in the data is explained in difference across __participants__.  
+
+Below, we perform a [linear discriminant analysis](https://en.wikipedia.org/wiki/Linear_discriminant_analysis) and visualize in 3D the first three discriminant variables. We can zoom and rotate the graph in order to compare __activity types__ and see how well they can be distinguished.  
+```{r explore_lda, cache=TRUE}
+# perform a lda and plot in 3D
+nl <- nlevels(HAR[["classe"]])
+HAR.lda <- lda(classe ~ ., data = HAR[, c(fts, "classe"), with = FALSE], 
+               prior = rep(1, nl) / nl)
+HAR.lda <- predict(HAR.lda, HAR[, c(fts, "classe"), with = FALSE])
+HAR.lda <- data.table(classe = HAR[["classe"]], HAR.lda$x)
+plot_ly(HAR.lda, x = ~LD3, y = ~LD1, z = ~LD2, color = ~classe, 
+        size = 1, sizes = 3) %>% add_markers() %>%
+      layout(title = "3D plots of the first three discriminant variables")
+```
+<br>
+
+As we can see by manipulating the 3D plot, it is still hard to clearly see a separation between __activity types__. Thus, our classification problem might not easily be linearly separable.  
+<br>
+
+# Machine Learning
+Below we train a [random forest](https://en.wikipedia.org/wiki/Random_forest) model on the training set. We retained this method because it is a good tradeoff between accuracy and training speed (we experimented beforehand with [extreme gradient boosting](https://cran.r-project.org/web/packages/xgboost/vignettes/xgboost.pdf) and the results were very comparable with random forests but for a much higher computational cost).  
+
+### Model fitting
+The initial training set is separated by indexation in a __training set__ and a __validation set__ (using a __80% ratio__). First, we perform a grid search on the indexed __training set__ in order to find the best [hyperparameters](https://en.wikipedia.org/wiki/Hyperparameter) for our random forest training algorithm. For each hyperparameter set, we estimate the accuracy through 10-fold [cross validation](https://en.wikipedia.org/wiki/Cross-validation_(statistics)).  
+
+We used the [caret package](http://topepo.github.io/caret/random-hyperparameter-search.html) for this first step. The computations are executed in parallel, using the [doParallel](https://cran.r-project.org/web/packages/doParallel/index.html) backend.  
+```{r training, cache=TRUE}
+# hold a sample for validation
+valIndex <- createDataPartition(HAR[["classe"]], times = 1, p = .8)[[1]]
+
+# set the training method (5-fold parallel cross validation)
+fitControl <- trainControl(method = "cv", number = 10, allowParallel = TRUE)
+
+# train models
+cl <- makeCluster(detectCores())
+registerDoParallel(cl)
+fit <- train(classe ~ ., data = HAR[-valIndex, c("classe", fts), with = FALSE], 
+             method = "rf", trControl = fitControl)
+stopCluster(cl)
+```
+<br>
+
+### Model validation
+Next, we test the retained model on the __validation set__.  
+```{r validation, cache=TRUE, results='hold'}
+# predict on the validation set
+pred <- predict(fit, newdata = HAR[valIndex, ..fts])
+cm <- confusionMatrix(pred, HAR[valIndex, classe])
+```
+<br>
+
+#### Confusion matrix
+_Predictions are in lowercase._  
+```{r cm1, echo=FALSE}
+pander(local({
+      out <- cm$table
+      rownames(out) <- tolower(colnames(out))
+      out
+}))
+```
+<br>
+
+#### Overall statistics
+```{r cm2,echo=FALSE}
+pander(local({
+      digits <- 4
+      tmp <- round(cm$overall, digits = digits)
+      pIndex <- grep("PValue", names(cm$overall))
+      tmp[pIndex] <- format.pval(cm$overall[pIndex], digits = digits)
+      overall <- tmp
+      accCI <- paste("(", paste(overall[c("AccuracyLower", 
+                                          "AccuracyUpper")], 
+                                collapse = ", "), ")", sep = "")
+      cm_stats <- data.frame(
+            Names = c("Accuracy :&nbsp;", "95% CI :&nbsp;", "No Information Rate :&nbsp;", 
+                      "P-Value [Acc > NIR] :&nbsp;", "&nbsp;", 
+                      "Kappa :&nbsp;", "Mcnemar's Test P-Value :&nbsp;"), 
+            Text = c(paste(overall["Accuracy"]), accCI, 
+                     paste(overall[c("AccuracyNull", "AccuracyPValue")]), 
+                     "&nbsp;", paste(overall["Kappa"]), paste(overall["McnemarPValue"])))
+      colnames(cm_stats) <- NULL
+      cm_stats
+}), emphasize.strong.cols = 1, justify = "rr")
+```
+<br>
+
+#### Statistics by class
+```{r cm3, echo=FALSE}
+pander(t(cm$byClass))
+```
+<br>
+
+The results are decent, with an accuracy of __`r formatC(cm$overall["Accuracy"] * 100, format = "f", digits = 2)`%__ (which is balanced across classes).  
+
+### Predicting new data
+We can finally predict on the test set. You can read the results in the table below.  
+```{r predict, cache=TRUE}
+# predict on the test data
+results <- data.table(
+      id = HAR.test$problem_id,
+      class = predict(fit, newdata = HAR.test[, ..fts])
+)
+setkey(results, id)
+```
+<br>
+
+#### Predictions on the test set
+```{r out_pred, echo=FALSE}
+pander(results)
+```
+<br>
+
+<!-- # Appendix -->
+<!-- ```{r show_features_dist, echo=FALSE, fig.height=20, cache=TRUE, dependson='features_dist'} -->
+<!-- features_dist -->
+<!-- ``` -->
+<!-- <br> -->
