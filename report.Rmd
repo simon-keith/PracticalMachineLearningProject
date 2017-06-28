@@ -307,7 +307,7 @@ pander(t(cm$byClass))
 ```
 <br>
 
-The results are decent, with an accuracy of __`r formatC(cm$overall["Accuracy"] * 100, format = "f", digits = 2)`%__ (which is balanced across classes).  
+The results are decent, with an accuracy of __`r formatC(cm$overall["Accuracy"] * 100, format = "f", digits = 2)`%__ (which is balanced across classes) and thus an out of sample error rate of __`r formatC(1 - cm$overall["Accuracy"] * 100, format = "f", digits = 2)`%__.  
 
 ### Predicting new data
 We can finally predict on the test set. You can read the results in the table below.  
