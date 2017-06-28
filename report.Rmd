@@ -254,7 +254,10 @@ registerDoParallel(cl)
 fit <- train(classe ~ ., data = HAR[-valIndex, c("classe", fts), with = FALSE], 
              method = "rf", trControl = fitControl)
 stopCluster(cl)
+fit
 ```
+<br>
+We note here that the __cross-validated accuracy__ of the selected model is __`r formatC(fit$results[fit$results$mtry == fit$finalModel$mtry, "Accuracy"] * 100, format = "f", digits = 2)`%__ (so a __`r formatC((1 - fit$results[fit$results$mtry == fit$finalModel$mtry, "Accuracy"]) * 100, format = "f", digits = 2)`%__ out of sample error rate).  
 <br>
 
 ### Model validation
@@ -307,7 +310,7 @@ pander(t(cm$byClass))
 ```
 <br>
 
-The results are decent, with an accuracy of __`r formatC(cm$overall["Accuracy"] * 100, format = "f", digits = 2)`%__ (which is balanced across classes) and thus an out of sample error rate of __`r formatC((1 - cm$overall["Accuracy"]) * 100, format = "f", digits = 2)`%__.  
+The results are decent, with an accuracy of __`r formatC(cm$overall["Accuracy"] * 100, format = "f", digits = 2)`%__ (which is balanced across classes) and thus an out of sample error rate of __`r formatC((1 - cm$overall["Accuracy"]) * 100, format = "f", digits = 2)`%__. This is actually better than the out of sample accuracy we estimated through cross-validation (__`r formatC(fit$results[fit$results$mtry == fit$finalModel$mtry, "Accuracy"] * 100, format = "f", digits = 2)`%__).  
 
 ### Predicting new data
 We can finally predict on the test set. You can read the results in the table below.  
